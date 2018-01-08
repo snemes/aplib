@@ -8,7 +8,7 @@ Approximately ~20 times faster than the other Python implementations.
 from io import BytesIO
 
 __all__ = ['decompress']
-__version__ = '0.1'
+__version__ = '0.2'
 __author__ = 'Sandor Nemes'
 
 
@@ -133,7 +133,7 @@ def ap_depack(source):
 
 def decompress(data):
     try:
-        return ap_depack(data)
+        return str(ap_depack(data))
     except Exception:
         raise Exception('aPLib decompression error')
 
