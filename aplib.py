@@ -8,7 +8,7 @@ Approximately ~20 times faster than the other Python implementations.
 from io import BytesIO
 
 __all__ = ['decompress']
-__version__ = '0.2'
+__version__ = '0.3'
 __author__ = 'Sandor Nemes'
 
 
@@ -66,7 +66,7 @@ def ap_depack(source):
                 if ap_getbit(ud):
                     offs = 0
 
-                    for _ in xrange(4):
+                    for _ in range(4):
                         offs = (offs << 1) + ap_getbit(ud)
 
                     if offs:
@@ -83,7 +83,7 @@ def ap_depack(source):
                     offs >>= 1
 
                     if offs:
-                        for _ in xrange(length):
+                        for _ in range(length):
                             ud.destination.append(ud.destination[-offs])
                     else:
                         done = True
@@ -98,7 +98,7 @@ def ap_depack(source):
 
                     length = ap_getgamma(ud)
 
-                    for _ in xrange(length):
+                    for _ in range(length):
                         ud.destination.append(ud.destination[-offs])
                 else:
                     if lwm == 0:
@@ -118,7 +118,7 @@ def ap_depack(source):
                     if offs < 128:
                         length += 2
 
-                    for _ in xrange(length):
+                    for _ in range(length):
                         ud.destination.append(ud.destination[-offs])
 
                     r0 = offs
@@ -133,12 +133,12 @@ def ap_depack(source):
 
 def decompress(data):
     try:
-        return str(ap_depack(data))
+        return bytes(ap_depack(data))
     except Exception:
         raise Exception('aPLib decompression error')
 
 
 if __name__ == '__main__':
     # self-test
-    data = 'T\x00he quick\xecb\x0erown\xcef\xaex\x80jumps\xed\xe4veur`t?lazy\xead\xfeg\xc0\x00'
-    assert decompress(data) == 'The quick brown fox jumps over the lazy dog'
+    data = b'T\x00he quick\xecb\x0erown\xcef\xaex\x80jumps\xed\xe4veur`t?lazy\xead\xfeg\xc0\x00'
+    assert decompress(data) == b'The quick brown fox jumps over the lazy dog'
