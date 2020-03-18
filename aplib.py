@@ -1,144 +1,178 @@
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 """A pure Python module for decompressing aPLib compressed data.
 
 Adapted from the original C source code from http://ibsensoftware.com/files/aPLib-1.1.1.zip
 
 Approximately ~20 times faster than the other Python implementations.
 """
+import struct
+from binascii import crc32
 from io import BytesIO
 
-__all__ = ['decompress']
-__version__ = '0.3'
+__all__ = ['APLib', 'decompress']
+__version__ = '0.4'
 __author__ = 'Sandor Nemes'
 
 
-class APDSTATE(object):
+class APLib:
     """internal data structure"""
 
-    def __init__(self, source):
+    def __init__(self, source, strict=True):
         self.source = BytesIO(source)
-        self.destination = bytearray()
+        self.destination = BytesIO()
         self.tag = 0
         self.bitcount = 0
+        self.strict = bool(strict)
+
+    def read(self):
+        return ord(self.source.read(1))
+
+    def write(self, value):
+        self.destination.write(bytes([value]))
+
+    def copy(self, length=1):
+        for _ in range(length):
+            self.write(self.read())
+
+    def dstcopy(self, offset, length=1):
+        for _ in range(length):
+            self.write(self.destination.getbuffer()[-offset])
+
+    def getbit(self):
+        # check if tag is empty
+        self.bitcount -= 1
+        if self.bitcount < 0:
+            # load next tag
+            self.tag = self.read()
+            self.bitcount = 7
+
+        # shift bit out of tag
+        bit = self.tag >> 7 & 1
+        self.tag <<= 1
+
+        return bit
+
+    def getgamma(self):
+        result = 1
+
+        # input gamma2-encoded bits
+        while True:
+            result = (result << 1) + self.getbit()
+            if not self.getbit():
+                break
+
+        return result
+
+    def depack(self):
+        r0 = -1
+        lwm = 0
+        done = False
+
+        try:
+
+            # first byte verbatim
+            self.copy()
+
+            # main decompression loop
+            while not done:
+                if self.getbit():
+                    if self.getbit():
+                        if self.getbit():
+                            offs = 0
+                            for _ in range(4):
+                                offs = (offs << 1) + self.getbit()
+
+                            if offs:
+                                self.dstcopy(offs)
+                            else:
+                                self.write(0)
+
+                            lwm = 0
+                        else:
+                            offs = self.read()
+                            length = 2 + (offs & 1)
+                            offs >>= 1
+
+                            if offs:
+                                self.dstcopy(offs, length)
+                            else:
+                                done = True
+
+                            r0 = offs
+                            lwm = 1
+                    else:
+                        offs = self.getgamma()
+
+                        if lwm == 0 and offs == 2:
+                            offs = r0
+                            length = self.getgamma()
+                            self.dstcopy(offs, length)
+                        else:
+                            if lwm == 0:
+                                offs -= 3
+                            else:
+                                offs -= 2
+
+                            offs <<= 8
+                            offs += self.read()
+                            length = self.getgamma()
+
+                            if offs >= 32000:
+                                length += 1
+                            if offs >= 1280:
+                                length += 1
+                            if offs < 128:
+                                length += 2
+
+                            self.dstcopy(offs, length)
+                            r0 = offs
+
+                        lwm = 1
+                else:
+                    self.copy()
+                    lwm = 0
+
+        except (TypeError, IndexError):
+            if self.strict:
+                raise RuntimeError('aPLib decompression error') from None
+
+        return self.destination.getvalue()
+
+    def pack(self):
+        raise NotImplementedError
 
 
-def ap_getbit(ud):
-    # check if tag is empty
-    ud.bitcount -= 1
-    if ud.bitcount < 0:
-        # load next tag
-        ud.tag = ord(ud.source.read(1))
-        ud.bitcount = 7
+def decompress(data, strict=False):
+    if not data.startswith(b'AP32'):
+        # raw data without header
+        return APLib(data, strict=strict).depack()
 
-    # shift bit out of tag
-    bit = ud.tag >> 7 & 0x01
-    ud.tag <<= 1
+    # data has an aPLib header
+    header_size, packed_size, packed_crc, orig_size, orig_crc = struct.unpack_from('=IIIII', data, 4)
+    data = data[header_size : header_size + packed_size]
 
-    return bit
+    if strict:
+        if len(data) != packed_size:
+            raise RuntimeError('Packed data size is incorrect')
+        if crc32(data) != packed_crc:
+            raise RuntimeError('Packed data checksum is incorrect')
 
+    result = APLib(data, strict=strict).depack()
 
-def ap_getgamma(ud):
-    result = 1
-
-    # input gamma2-encoded bits
-    while True:
-        result = (result << 1) + ap_getbit(ud)
-        if not ap_getbit(ud):
-            break
+    if strict:
+        if len(result) != orig_size:
+            raise RuntimeError('Unpacked data size is incorrect')
+        if crc32(result) != orig_crc:
+            raise RuntimeError('Unpacked data checksum is incorrect')
 
     return result
 
 
-def ap_depack(source):
-    ud = APDSTATE(source)
-
-    r0 = -1
-    lwm = 0
-    done = False
-
-    # first byte verbatim
-    ud.destination += ud.source.read(1)
-
-    # main decompression loop
-    while not done:
-        if ap_getbit(ud):
-            if ap_getbit(ud):
-                if ap_getbit(ud):
-                    offs = 0
-
-                    for _ in range(4):
-                        offs = (offs << 1) + ap_getbit(ud)
-
-                    if offs:
-                        ud.destination.append(ud.destination[-offs])
-                    else:
-                        ud.destination.append(0x00)
-
-                    lwm = 0
-                else:
-                    offs = ord(ud.source.read(1))
-
-                    length = 2 + (offs & 0x0001)
-
-                    offs >>= 1
-
-                    if offs:
-                        for _ in range(length):
-                            ud.destination.append(ud.destination[-offs])
-                    else:
-                        done = True
-
-                    r0 = offs
-                    lwm = 1
-            else:
-                offs = ap_getgamma(ud)
-
-                if lwm == 0 and offs == 2:
-                    offs = r0
-
-                    length = ap_getgamma(ud)
-
-                    for _ in range(length):
-                        ud.destination.append(ud.destination[-offs])
-                else:
-                    if lwm == 0:
-                        offs -= 3
-                    else:
-                        offs -= 2
-
-                    offs <<= 8
-                    offs += ord(ud.source.read(1))
-
-                    length = ap_getgamma(ud)
-
-                    if offs >= 32000:
-                        length += 1
-                    if offs >= 1280:
-                        length += 1
-                    if offs < 128:
-                        length += 2
-
-                    for _ in range(length):
-                        ud.destination.append(ud.destination[-offs])
-
-                    r0 = offs
-
-                lwm = 1
-        else:
-            ud.destination += ud.source.read(1)
-            lwm = 0
-
-    return ud.destination
-
-
-def decompress(data):
-    try:
-        return bytes(ap_depack(data))
-    except Exception:
-        raise Exception('aPLib decompression error')
-
-
-if __name__ == '__main__':
+def main():
     # self-test
     data = b'T\x00he quick\xecb\x0erown\xcef\xaex\x80jumps\xed\xe4veur`t?lazy\xead\xfeg\xc0\x00'
     assert decompress(data) == b'The quick brown fox jumps over the lazy dog'
+
+
+if __name__ == '__main__':
+    main()
