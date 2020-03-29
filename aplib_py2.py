@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python2
 """
 A pure Python module for decompressing aPLib compressed data.
 Adapted from the original C source code from http://ibsensoftware.com/files/aPLib-1.1.1.zip
@@ -13,7 +13,7 @@ __version__ = '0.5'
 __author__ = 'Sandor Nemes'
 
 
-class APLib:
+class APLib(object):
     """internal data structure"""
 
     def __init__(self, source, strict=True):
@@ -27,15 +27,15 @@ class APLib:
         return ord(self.source.read(1))
 
     def write(self, value):
-        self.destination.write(bytes([value]))
+        self.destination.write(chr(value))
 
     def copy(self, length=1):
-        for _ in range(length):
+        for _ in xrange(length):
             self.write(self.read())
 
     def dstcopy(self, offset, length=1):
-        for _ in range(length):
-            self.write(self.destination.getbuffer()[-offset])
+        for _ in xrange(length):
+            self.write(ord(self.destination.getvalue()[-offset]))
 
     def getbit(self):
         # check if tag is empty
@@ -78,7 +78,7 @@ class APLib:
                     if self.getbit():
                         if self.getbit():
                             offs = 0
-                            for _ in range(4):
+                            for _ in xrange(4):
                                 offs = (offs << 1) + self.getbit()
 
                             if offs:
@@ -133,7 +133,7 @@ class APLib:
 
         except (TypeError, IndexError):
             if self.strict:
-                raise RuntimeError('aPLib decompression error') from None
+                raise RuntimeError('aPLib decompression error')
 
         return self.destination.getvalue()
 
@@ -147,7 +147,7 @@ def decompress(data, strict=False):
     orig_size = None
     orig_crc = None
 
-    if data.startswith(b'AP32') and len(data) >= 24:
+    if data.startswith('AP32') and len(data) >= 24:
         # data has an aPLib header
         header_size, packed_size, packed_crc, orig_size, orig_crc = struct.unpack_from('=IIIII', data, 4)
         data = data[header_size : header_size + packed_size]
@@ -171,8 +171,8 @@ def decompress(data, strict=False):
 
 def main():
     # self-test
-    data = b'T\x00he quick\xecb\x0erown\xcef\xaex\x80jumps\xed\xe4veur`t?lazy\xead\xfeg\xc0\x00'
-    assert decompress(data) == b'The quick brown fox jumps over the lazy dog'
+    data = 'T\x00he quick\xecb\x0erown\xcef\xaex\x80jumps\xed\xe4veur`t?lazy\xead\xfeg\xc0\x00'
+    assert decompress(data) == 'The quick brown fox jumps over the lazy dog'
 
 
 if __name__ == '__main__':
