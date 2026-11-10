@@ -1,5 +1,6 @@
 import ast
 import os
+import random
 import struct
 import unittest
 from binascii import crc32
@@ -205,13 +206,57 @@ class TestAP32Header(unittest.TestCase):
     def test_invalid_header_size(self):
         # header_size < 24
         bad_small = _make_ap32_header(self.SAMPLE_PACKED, self.SAMPLE_UNPACKED, header_size=12)
-        with self.assertRaisesRegex(APLibError, 'Header size is incorrect'):
-            decompress(bad_small, strict=True)
-
         # header_size > len(data) with packed_size=0
         bad_large = b'AP32' + struct.pack('<IIIII', 64, 0, 0, 0, 0)
-        with self.assertRaisesRegex(APLibError, 'Header size is incorrect'):
-            decompress(bad_large, strict=True)
+
+        # An invalid header is never decompressed as data, not even in non-strict mode
+        for payload in (bad_small, bad_large):
+            for strict in (True, False):
+                with self.assertRaisesRegex(APLibError, 'Header size is incorrect'):
+                    decompress(payload, strict=strict)
+
+    def test_headered_argument(self):
+        wrapped = _make_ap32_header(self.SAMPLE_PACKED, self.SAMPLE_UNPACKED)
+        self.assertEqual(decompress(wrapped, headered=None), self.SAMPLE_UNPACKED)
+        self.assertEqual(decompress(wrapped, headered=True), self.SAMPLE_UNPACKED)
+        self.assertEqual(decompress(self.SAMPLE_PACKED, headered=False), self.SAMPLE_UNPACKED)
+
+        # headered=True requires an AP32 header
+        for payload in (self.SAMPLE_PACKED, wrapped[:23]):
+            for strict in (True, False):
+                with self.assertRaisesRegex(APLibError, 'AP32 header is missing'):
+                    decompress(payload, strict=strict, headered=True)
+
+        # headered=False never parses a header, so the header is decompressed as a raw stream.
+        # A valid raw stream cannot start with b'AP32': it decodes to 'A' and '3', followed by
+        # a match with offset 50, which is out of bounds.
+        with self.assertRaises(APLibError):
+            decompress(wrapped, headered=False)
+        self.assertEqual(decompress(wrapped, strict=False, headered=False), b'A3')
+
+    def test_orig_size_limits_output_in_both_modes(self):
+        # Header claims a smaller original size than what the packed data expands to
+        bad_orig_size_small = _make_ap32_header(
+            self.SAMPLE_PACKED, self.SAMPLE_UNPACKED, orig_size=10
+        )
+        for strict in (True, False):
+            with self.assertRaisesRegex(APLibError, 'Unpacked data size is incorrect'):
+                decompress(bad_orig_size_small, strict=strict)
+
+        # ... even if the caller disabled max_size
+        with self.assertRaisesRegex(APLibError, 'Unpacked data size is incorrect'):
+            decompress(bad_orig_size_small, max_size=None)
+
+        # A smaller max_size still applies
+        wrapped = _make_ap32_header(self.SAMPLE_PACKED, self.SAMPLE_UNPACKED)
+        with self.assertRaisesRegex(APLibError, 'exceeds max_size'):
+            decompress(wrapped, max_size=10)
+
+        # Non-strict mode still ignores the header checksums
+        bad_packed_crc = _make_ap32_header(
+            self.SAMPLE_PACKED, self.SAMPLE_UNPACKED, packed_crc=0x12345678
+        )
+        self.assertEqual(decompress(bad_packed_crc, strict=False), self.SAMPLE_UNPACKED)
 
     def test_header_size_and_crc_mismatches(self):
         # Packed size mismatch (packed_size larger than available data)
@@ -333,18 +378,84 @@ class TestEdgeCasesAndRegressions(unittest.TestCase):
         unpacked = TestAPLibDecompression.SAMPLE_UNPACKED
 
         # Exact max_size succeeds
-        self.assertEqual(
-            decompress(sample, strict=True, max_size=len(unpacked)),
-            unpacked,
-        )
+        for strict in (True, False):
+            self.assertEqual(
+                decompress(sample, strict=strict, max_size=len(unpacked)),
+                unpacked,
+            )
 
-        # Smaller max_size raises in strict=True and truncates in strict=False
+        # A smaller max_size raises in both modes instead of silently truncating the output
+        for strict in (True, False):
+            with self.assertRaisesRegex(APLibError, 'exceeds max_size'):
+                decompress(sample, strict=strict, max_size=10)
+
+            # Also works directly on APLib class
+            with self.assertRaisesRegex(APLibError, 'exceeds max_size'):
+                APLib(sample, strict=strict, max_size=5).depack()
+
+        # max_size=None disables the limit
+        self.assertEqual(decompress(sample, max_size=None), unpacked)
+        self.assertEqual(APLib(sample, max_size=None).depack(), unpacked)
+
+    def test_safe_defaults(self):
+        self.assertEqual(aplib.DEFAULT_MAX_SIZE, 64 * 1024 * 1024)
+
+        # decompress() is strict by default: malformed input raises instead of returning partial output
         with self.assertRaises(APLibError):
-            decompress(sample, strict=True, max_size=10)
-        self.assertEqual(decompress(sample, strict=False, max_size=10), unpacked[:10])
+            decompress(b'A')
 
-        # Also works directly on APLib class
-        self.assertEqual(APLib(sample, strict=False, max_size=5).depack(), unpacked[:5])
+        # The default max_size applies to both decompress() and APLib, in both modes.
+        # A match that would exceed it is rejected before any data is copied.
+        builder = _APLibStreamBuilder(ord('A'))
+        builder.add_gamma_match(offs=1, raw_gamma_length=aplib.DEFAULT_MAX_SIZE, lwm=0)
+        builder.add_end_marker()
+        payload = builder.build()
+        for strict in (True, False):
+            with self.assertRaisesRegex(APLibError, 'exceeds max_size'):
+                decompress(payload, strict=strict)
+            with self.assertRaisesRegex(APLibError, 'exceeds max_size'):
+                APLib(payload, strict=strict).depack()
+
+    def test_non_bytes_input_rejected(self):
+        # bytes(n) would allocate n zero bytes for an integer instead of failing
+        for value in (8, 1 << 40, None, 1.5):
+            with self.assertRaises(TypeError):
+                decompress(value)
+            with self.assertRaises(TypeError):
+                APLib(value)
+
+    def test_resource_errors_always_raise(self):
+        # MemoryError, and OverflowError from xrange() on Python 2 builds with a 32-bit C long,
+        # must be reported as APLibError, and must not be swallowed in non-strict mode
+        builder = _APLibStreamBuilder(ord('A'))
+        builder.add_short_byte_match(offs=1, length=2)
+        builder.add_end_marker()
+        payload = builder.build()
+
+        orig_range = aplib._range
+        for exc_type in (MemoryError, OverflowError):
+            def failing_range(n, exc_type=exc_type):
+                raise exc_type()
+
+            aplib._range = failing_range
+            try:
+                for strict in (True, False):
+                    with self.assertRaisesRegex(APLibError, 'too large'):
+                        decompress(payload, strict=strict)
+            finally:
+                aplib._range = orig_range
+
+    def test_random_input_only_raises_aplib_error(self):
+        rng = random.Random(1234)
+        for i in range(1000):
+            payload = bytes(bytearray(rng.randrange(256) for _ in range(rng.randrange(64))))
+            for strict in (True, False):
+                try:
+                    result = decompress(payload, strict=strict, max_size=4096)
+                except APLibError:
+                    continue
+                self.assertIsInstance(result, bytes)
+                self.assertLessEqual(len(result), 4096)
 
     def test_python2_signed_crc32_and_ast_compatibility(self):
         # Simulate Python 2's signed 32-bit crc32() return value when MSB is 1
